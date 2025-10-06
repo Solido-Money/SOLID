@@ -1,0 +1,57 @@
+---
+compiled_package_info:
+  package_name: vesting_contract_test
+  address_alias_instantiation:
+    Extensions: "0000000000000000000000000000000000000000000000000000000000000001"
+    PROTO: 6816233fc9f44ee3b8f7cfecb2afb1fd8a6eabeb28a9be877e465893afd99731
+    TEST: 7c3b360ffd02abeb8dd413a0c02099511f235412f4eed3cf52342a698bb13fcb
+    aptos_std: "0000000000000000000000000000000000000000000000000000000000000001"
+    aptos_token: "0000000000000000000000000000000000000000000000000000000000000003"
+    core_resources: 000000000000000000000000000000000000000000000000000000000a550c18
+    std: "0000000000000000000000000000000000000000000000000000000000000001"
+    supra_framework: "0000000000000000000000000000000000000000000000000000000000000001"
+    supra_fungible_asset: 000000000000000000000000000000000000000000000000000000000000000a
+    supra_std: "0000000000000000000000000000000000000000000000000000000000000001"
+    vm: "0000000000000000000000000000000000000000000000000000000000000000"
+    vm_reserved: "0000000000000000000000000000000000000000000000000000000000000000"
+  source_digest: 200B9007A437A09F2BA7F21A281A263661F0B13E24212FD421B04AFA31A6D517
+  build_flags:
+    dev_mode: false
+    test_mode: false
+    override_std: ~
+    generate_docs: false
+    generate_abis: false
+    generate_move_model: true
+    full_model_generation: false
+    install_dir: ~
+    force_recompilation: false
+    additional_named_addresses: {}
+    architecture: ~
+    fetch_deps_only: false
+    skip_fetch_latest_git_deps: false
+    compiler_config:
+      bytecode_version: ~
+      known_attributes:
+        - bytecode_instruction
+        - deprecated
+        - event
+        - expected_failure
+        - "fmt::skip"
+        - legacy_entry_fun
+        - "lint::allow_unsafe_randomness"
+        - native_interface
+        - randomness
+        - resource_group
+        - resource_group_member
+        - test
+        - test_only
+        - verify_only
+        - view
+      skip_attribute_checks: false
+      compiler_version: ~
+      language_version: ~
+dependencies:
+  - AptosStdlib
+  - MoveStdlib
+  - SupraFramework
+  - SupraStdlib

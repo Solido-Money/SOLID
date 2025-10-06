@@ -1,0 +1,17 @@
+[package]
+name = "vesting_contract_test"
+version = "1.0.0"
+authors = []
+
+[addresses]
+PROTO = "0x6816233fc9f44ee3b8f7cfecb2afb1fd8a6eabeb28a9be877e465893afd99731"
+TEST = "0x7c3b360ffd02abeb8dd413a0c02099511f235412f4eed3cf52342a698bb13fcb"
+
+[dev-addresses]
+
+[dependencies.SupraFramework]
+git = "https://github.com/Entropy-Foundation/aptos-core.git"
+rev = "dev"
+subdir = "aptos-move/framework/supra-framework"
+
+[dev-dependencies]
