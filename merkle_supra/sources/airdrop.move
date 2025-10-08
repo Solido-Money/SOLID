@@ -26,6 +26,7 @@ module PROTO::airdrop {
         end_time: u64,
         max_recipient: u64,
         claims: vector<bool>,
+        total_burned: u64,  // NEW: Track total burned from slashing
     }
 
     struct Treasury has key {
@@ -37,6 +38,9 @@ module PROTO::airdrop {
         claimant: address,
         amount: u64,
         index: u64,
+        slashed: bool,  // NEW: Track if claim was slashed
+        actual_received: u64,  // NEW: Actual amount received (50% if slashed)
+        burned_amount: u64,  // NEW: Amount burned (50% if slashed, 0 otherwise)
     }
 
     #[event]
@@ -91,6 +95,7 @@ module PROTO::airdrop {
             end_time,
             max_recipient,
             claims,
+            total_burned: 0,  // NEW: Initialize burned counter
         });
 
         move_to(admin, Treasury {
@@ -155,6 +160,68 @@ module PROTO::airdrop {
             claimant: user,
             amount,
             index,
+            slashed: false,  // NEW: Regular claim, not slashed
+            actual_received: amount,  // NEW: Full amount received
+            burned_amount: 0,  // NEW: Nothing burned
+        });
+    }
+
+    // NEW FUNCTION: Claim with 50% slashing
+    public entry fun claim_with_slashing(
+        account: &signer,
+        amount: u64,
+        index: u64,
+        proof: vector<vector<u8>>
+    ) acquires Airdrop, Treasury {
+        let user = signer::address_of(account);
+        let airdrop = borrow_global_mut<Airdrop>(@PROTO);
+        let now = timestamp::now_seconds();
+
+        // Same validations as regular claim
+        assert!(now <= airdrop.end_time, E_AIRDROP_ENDED);
+        assert!(index < airdrop.max_recipient, E_INVALID_INDEX);
+        assert!(!*vector::borrow(&airdrop.claims, index), E_ALREADY_CLAIMED);
+        assert!(airdrop.total_claimed + amount <= airdrop.total_allocation, E_INSUFFICIENT_BALANCE);
+
+        // Verify merkle proof for FULL amount
+        let leaf_data = vector::empty<u8>();
+        vector::append(&mut leaf_data, bcs::to_bytes(&user));
+        vector::append(&mut leaf_data, bcs::to_bytes(&amount));  
+        vector::append(&mut leaf_data, bcs::to_bytes(&index));   
+        let leaf = hash::sha3_256(leaf_data);                   
+
+        assert!(verify_merkle_proof(&leaf, &proof, &airdrop.merkle_root, index), E_INVALID_PROOF);
+
+        // Mark claim as complete
+        *vector::borrow_mut(&mut airdrop.claims, index) = true;
+        
+        // Account for FULL amount in total_claimed (Option A)
+        airdrop.total_claimed = airdrop.total_claimed + amount;
+
+        // Calculate slashed amounts: 50% to user, 50% burned
+        let amount_to_receive = amount / 2;
+        let amount_to_burn = amount - amount_to_receive;  // Handles odd numbers correctly
+
+        let treasury = borrow_global_mut<Treasury>(@PROTO);
+        
+        // Extract tokens for user (50%)
+        let user_coins = coin::extract(&mut treasury.coins, amount_to_receive);
+        coin::deposit(user, user_coins);
+
+        // Extract and burn remaining tokens (50%)
+        let burn_coins = coin::extract(&mut treasury.coins, amount_to_burn);
+        coin::burn(burn_coins, &supra_framework::supra_coin::get_burn_cap());
+
+        // Track total burned
+        airdrop.total_burned = airdrop.total_burned + amount_to_burn;
+
+        event::emit<ClaimEvent>(ClaimEvent {
+            claimant: user,
+            amount,  // Original entitled amount
+            index,
+            slashed: true,  // This was a slashed claim
+            actual_received: amount_to_receive,  // 50% received
+            burned_amount: amount_to_burn,  // 50% burned
         });
     }
 
@@ -233,6 +300,7 @@ module PROTO::airdrop {
             end_time: _,
             max_recipient: _,
             claims: _,
+            total_burned: _,  // NEW: Unpack burned field
         } = move_from<Airdrop>(@PROTO);
 
         let Treasury { coins } = move_from<Treasury>(@PROTO);
@@ -262,6 +330,23 @@ module PROTO::airdrop {
             airdrop.end_time,
             airdrop.max_recipient,
             remaining  // remaining allocation
+        )
+    }
+
+    // NEW: Get detailed airdrop info including burned tokens
+    #[view]
+    public fun get_detailed_airdrop_info(): (vector<u8>, u64, u64, u64, u64, u64, u64) acquires Airdrop {
+        assert!(exists<Airdrop>(@PROTO), E_AIRDROP_NOT_INITIALIZED);
+        let airdrop = borrow_global<Airdrop>(@PROTO);
+        let remaining = airdrop.total_allocation - airdrop.total_claimed;
+        (
+            airdrop.merkle_root,
+            airdrop.total_claimed,
+            airdrop.total_allocation,
+            airdrop.end_time,
+            airdrop.max_recipient,
+            remaining,
+            airdrop.total_burned  // NEW: Total burned from slashing
         )
     }
 
@@ -317,6 +402,28 @@ module PROTO::airdrop {
             };
             total
         }
+    }
+
+    // NEW: Calculate slashed amount (50% of original)
+    #[view]
+    public fun calculate_slashed_amount(amount: u64): u64 {
+        amount / 2
+    }
+
+    // NEW: Preview slashed claim amounts
+    #[view]
+    public fun preview_slashed_claim(amount: u64): (u64, u64) {
+        let amount_to_receive = amount / 2;
+        let amount_to_burn = amount - amount_to_receive;
+        (amount_to_receive, amount_to_burn)
+    }
+
+    // NEW: Get total burned tokens
+    #[view]
+    public fun get_total_burned(): u64 acquires Airdrop {
+        assert!(exists<Airdrop>(@PROTO), E_AIRDROP_NOT_INITIALIZED);
+        let airdrop = borrow_global<Airdrop>(@PROTO);
+        airdrop.total_burned
     }
 
     // Check eligibility with proof verification (frontend helper)
