@@ -268,13 +268,15 @@ module PROTO::airdrop {
         });
     }
 
-    /// Claim for veSOLID locking (full amount transferred to user)
-    /// User then manually calls vesting_escrow::create_lock
+    /// Claim for veSOLID locking (tokens locked in vesting_escrow)
+    /// Airdrop contract calls vesting_escrow::create_lock internally
     public entry fun claim_for_vesolid_lock(
         account: &signer,
         amount: u64,
         index: u64,
-        proof: vector<vector<u8>>
+        proof: vector<vector<u8>>,
+        solid_metadata: Object<Metadata>,
+        lock_duration: u64
     ) acquires Airdrop, Treasury {
         let user = signer::address_of(account);
         let airdrop = borrow_global_mut<Airdrop>(@PROTO);
@@ -305,13 +307,14 @@ module PROTO::airdrop {
         let user_coins = coin::extract(&mut treasury.coins, amount);
         coin::deposit(user, user_coins);
 
-        // Emit event with instruction to user
-        let instruction = b"Please call vesting_escrow::create_lock with your airdrop tokens to lock them for veSOLID voting power";
+        // Create veSOLID lock for user
+        vesting_escrow::create_lock(account, solid_metadata, amount, lock_duration);
+
         event::emit(VeSOLIDClaimEvent {
             claimant: user,
             amount,
             index,
-            message: instruction,
+            message: b"Airdrop tokens locked in veSOLID escrow",
         });
     }
 
