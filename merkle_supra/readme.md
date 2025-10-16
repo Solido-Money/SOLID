@@ -1,10 +1,13 @@
-# Merkle Airdrop Contract with Slashing Mechanism
+# SOLID Airdrop Contract with Multi-Claim Options
 
 ## Overview
 
 This is a merkle tree-based airdrop contract that enables efficient and secure token distribution to a large number of recipients. The contract uses cryptographic merkle proofs to verify eligibility without storing individual allocations on-chain, significantly reducing gas costs and storage requirements.
 
-**Key Feature**: The contract includes an innovative **slashing mechanism** where users can opt to claim 50% of their allocation immediately, with the other 50% being burned. This provides flexibility for users who want immediate liquidity while implementing a deflationary mechanism.
+**Key Features**: Users can now choose between three claiming options:
+1. **Slashing Claim**: 50% received, 50% burned (immediate liquidity)
+2. **Vesting Claim**: Full amount vested over a predefined schedule
+3. **veSOLID Lock**: Full amount locked for voting power and rewards
 
 ## Core Concepts
 
@@ -21,17 +24,32 @@ This approach allows for:
 - ✅ Secure verification through cryptographic proofs
 - ✅ One-time claims per index (no double-spending)
 
-### Slashing Mechanism
-Users have **two claiming options**:
+### Three Claim Options
 
-1. **Regular Claim**: Receive 100% of allocated tokens
-2. **Slashed Claim**: Receive 50% immediately, 50% is burned permanently
+Users now have flexibility in how they receive their airdrop:
 
-This dual-option system enables:
-- Early liquidity for users who need immediate access
-- Deflationary pressure on token supply
-- Flexibility in claiming strategy
-- Transparent tracking of burned tokens
+#### 1. **Slashing Claim**
+- Receive 50% immediately
+- 50% is burned permanently
+- Best for: Users needing immediate liquidity
+- Risk: Half the allocation is permanently lost
+
+#### 2. **Vesting Claim**
+- Full amount received but time-locked
+- Follows a predefined vesting schedule:
+  - TGE%: Released immediately at claim time
+  - Cliff period: No additional releases
+  - Linear vesting: Equal releases over periods
+- Best for: Long-term holders, tax planning
+- Benefit: Full allocation received, just time-delayed
+
+#### 3. **veSOLID Lock Claim**
+- Full amount locked in veSOLID escrow
+- Provides voting power that decays linearly over lock duration
+- Earns rewards based on lock APR and duration
+- User chooses lock duration (1 week to 4 years)
+- Best for: Governance participation, reward maximization
+- Benefit: Voting power + reward accrual
 
 ## Features
 
@@ -45,7 +63,7 @@ Set up the airdrop campaign with merkle root and parameters.
 - `total_allocation`: Total tokens allocated for airdrop
 - `merkle_root`: Root hash of the merkle tree
 - `duration_days`: Number of days airdrop remains active
-- `max_recipient`: Maximum number of recipients (for claims vector sizing)
+- `max_recipient`: Maximum number of recipients
 
 **Requirements:**
 - Only admin can initialize
@@ -70,16 +88,17 @@ Transfer tokens into the airdrop treasury.
 
 **Emits**: `FundEvent`
 
-### 3. **Regular Claim (100%)**
-Claim full allocated amount.
+### 3. **Claim with Slashing (50%)**
+Claim 50% of allocation with 50% burned.
 
-**Function**: `claim`
+**Function**: `claim_with_slashing`
 
 **Parameters:**
 - `account`: User's signer
 - `amount`: Allocated amount (from merkle tree)
 - `index`: User's unique index in merkle tree
 - `proof`: Array of sibling hashes for merkle proof
+- `solid_metadata`: Token metadata object
 
 **Requirements:**
 - Airdrop must be active (not ended)
@@ -88,45 +107,112 @@ Claim full allocated amount.
 - Sufficient tokens in treasury
 
 **Process:**
-1. Verify merkle proof matches (user, amount, index)
-2. Mark index as claimed
-3. Transfer 100% of tokens to user
-4. Update total_claimed counter
+1. Verify merkle proof for full amount
+2. Mark index as claimed (prevents future claims)
+3. Calculate: 50% to user, 50% burned
+4. Transfer user's portion
+5. Burn remaining portion
+6. Update total_claimed and total_burned
 
-**Emits**: `ClaimEvent` with `slashed: false`
+**Emits**: `ClaimEvent` with claim_type = CLAIM_TYPE_SLASH
 
-### 4. **Slashed Claim (50%)**
-Claim 50% of allocation with 50% burned.
+**Example:**
+```
+Allocated: 1000 tokens
+Receives:  500 tokens
+Burned:    500 tokens
+```
 
-**Function**: `claim_with_slashing`
+### 4. **Claim with Vesting**
+Full amount sent to vesting contract with predefined schedule.
 
-**Parameters:** (Same as regular claim)
+**Function**: `claim_with_vesting`
+
+**Parameters:**
 - `account`: User's signer
 - `amount`: Allocated amount (from merkle tree)
 - `index`: User's unique index
 - `proof`: Merkle proof
+- `solid_metadata`: Token metadata object
 
-**Requirements:** (Same as regular claim)
+**Requirements:**
+- Airdrop must be active
+- Index must be valid and not claimed
+- Merkle proof must be valid
+- Vesting config must be initialized (admin-set schedule)
+- Sufficient tokens in treasury
 
 **Process:**
-1. Verify merkle proof for FULL amount
-2. Mark index as claimed (prevents any future claims)
-3. Calculate split: 50% to user, 50% to burn
-4. Transfer 50% to user
-5. Burn remaining 50%
-6. Update total_claimed (full amount) and total_burned
+1. Verify merkle proof
+2. Mark index as claimed
+3. Transfer tokens to user's primary store
+4. Create vesting position with fixed schedule:
+   - TGE amount released immediately
+   - Cliff period with cliff amount
+   - Linear vesting over periods
+5. Tokens are held in user's vesting contract
 
-**Emits**: `ClaimEvent` with `slashed: true`
+**Emits**: `VestingClaimEvent` with start_time
 
-**Example:**
-```
-Allocated Amount: 1000 tokens
-User Receives:    500 tokens
-Burned:          500 tokens
-Total Claimed:   1000 tokens (counted in airdrop stats)
-```
+**Vesting Schedule (Fixed by Admin):**
+- TGE%: Released at claim time
+- Cliff period: Locked (no releases)
+- After cliff: Linear releases over N periods
 
-### 5. **End Airdrop**
+**User Can Then:**
+- Call `vesting::claim_airdrop_vesting()` to release unlocked portions
+- See vesting progress with view functions
+- Get rewards as schedule unlocks
+
+### 5. **Claim for veSOLID Lock**
+Full amount locked in veSOLID with user-chosen duration.
+
+**Function**: `claim_for_vesolid_lock`
+
+**Parameters:**
+- `account`: User's signer
+- `amount`: Allocated amount (from merkle tree)
+- `index`: User's unique index
+- `proof`: Merkle proof
+- `solid_metadata`: Token metadata object
+- `lock_duration`: How long to lock (1 week to 4 years in seconds)
+
+**Requirements:**
+- Airdrop must be active
+- Index must be valid and not claimed
+- Merkle proof must be valid
+- Lock duration must be valid
+- Sufficient tokens in treasury
+
+**Process:**
+1. Verify merkle proof
+2. Mark index as claimed
+3. Transfer tokens to user's primary store
+4. Call `vesting_escrow::create_lock()` internally with:
+   - User as owner
+   - Full allocation amount
+   - User-specified duration
+5. Tokens immediately locked in veSOLID
+
+**Emits**: `VeSOLIDClaimEvent` with lock confirmation
+
+**User Benefits:**
+- Voting power: `amount * remaining_duration / MAX_LOCK_DURATION`
+- Voting power decays linearly over lock period
+- Earns rewards based on current APR and lock duration
+- Can extend lock duration later with `increase_time()`
+- Withdraw after lock expires with full principal + rewards
+
+**Lock Duration Options:**
+- Minimum: 1 week (604,800 seconds)
+- Maximum: 4 years (126,230,400 seconds)
+- Common durations:
+  - 1 month: ~2,592,000 seconds
+  - 3 months: ~7,776,000 seconds
+  - 1 year: ~31,536,000 seconds
+  - 4 years: ~126,230,400 seconds
+
+### 6. **End Airdrop**
 Manually end the airdrop before scheduled end time.
 
 **Function**: `end_airdrop`
@@ -134,9 +220,13 @@ Manually end the airdrop before scheduled end time.
 **Parameters:**
 - `admin`: Admin signer
 
+**Process:**
+- Sets end_time to current timestamp
+- No more claims can be made after this
+
 **Emits**: `AirdropEndedEvent`
 
-### 6. **Emergency Withdraw**
+### 7. **Emergency Withdraw**
 Withdraw remaining unclaimed tokens (admin only).
 
 **Function**: `emergency_withdraw`
@@ -148,11 +238,11 @@ Withdraw remaining unclaimed tokens (admin only).
 **Process:**
 - Calculates remaining tokens (allocation - claimed)
 - Transfers remaining to specified address
-- Sets end_time to now (ends airdrop)
+- Ends the airdrop
 
 **Emits**: `EmergencyWithdrawEvent`
 
-### 7. **Clear Airdrop**
+### 8. **Clear Airdrop**
 Remove airdrop state from contract (cleanup).
 
 **Function**: `clear_airdrop`
@@ -173,6 +263,7 @@ struct Airdrop {
     max_recipient: u64,             // Maximum number of recipients
     claims: vector<bool>,           // Bitmap of claimed indices
     total_burned: u64,              // Total tokens burned from slashing
+    claim_types: vector<u64>,       // Track claim type per user
 }
 ```
 
@@ -185,31 +276,42 @@ struct Treasury {
 
 ## Events
 
-### ClaimEvent
+### ClaimEvent (Slashing Only)
 ```move
 struct ClaimEvent {
     claimant: address,              // Who claimed
     amount: u64,                    // Original allocated amount
     index: u64,                     // Merkle tree index
-    slashed: bool,                  // Whether 50% was slashed
-    actual_received: u64,           // Actual tokens received (50% or 100%)
-    burned_amount: u64,             // Tokens burned (50% or 0)
+    claim_type: u64,                // CLAIM_TYPE_SLASH = 1
+    actual_received: u64,           // 50% of amount
+    burned_amount: u64,             // 50% of amount
 }
 ```
 
-### AirdropInitEvent
+### VestingClaimEvent
 ```move
-struct AirdropInitEvent {
-    total_allocation: u64,
-    max_recipient: u64,
-    end_time: u64,
-    merkle_root: vector<u8>,
+struct VestingClaimEvent {
+    claimant: address,              // Who claimed
+    amount: u64,                    // Full allocation
+    index: u64,                     // Merkle tree index
+    start_time: u64,                // When vesting starts (claim time)
+}
+```
+
+### VeSOLIDClaimEvent
+```move
+struct VeSOLIDClaimEvent {
+    claimant: address,              // Who claimed
+    amount: u64,                    // Full allocation locked
+    index: u64,                     // Merkle tree index
+    message: vector<u8>,            // Confirmation message
 }
 ```
 
 ### Other Events
+- `AirdropInitEvent`: When airdrop initializes
 - `AirdropEndedEvent`: When airdrop ends
-- `EmergencyWithdrawEvent`: When admin withdraws remaining tokens
+- `EmergencyWithdrawEvent`: When admin withdraws
 - `FundEvent`: When treasury is funded
 
 ## View Functions
@@ -236,28 +338,14 @@ Seconds until airdrop ends (0 if ended).
 #### `is_claimed(index: u64): bool`
 Check if specific index has been claimed.
 
+#### `get_claim_type(index: u64): u64`
+Returns claim type used (1=slash, 2=vesting, 3=vesolid).
+
 #### `get_total_claims(): u64`
 Count of how many indices have been claimed.
 
 #### `get_remaining_balance(): u64`
-Tokens still available for claims.
-
-### Slashing Calculations
-
-#### `calculate_slashed_amount(amount: u64): u64`
-Calculate 50% of an amount (what user receives).
-
-#### `preview_slashed_claim(amount: u64): (u64, u64)`
-Returns: `(amount_to_receive, amount_to_burn)`
-
-**Example:**
-```move
-preview_slashed_claim(1000) 
-// Returns: (500, 500)
-
-preview_slashed_claim(999)  // Handles odd numbers
-// Returns: (499, 500)
-```
+Tokens still available in treasury for claims.
 
 #### `get_total_burned(): u64`
 Total tokens burned from all slashed claims.
@@ -285,6 +373,8 @@ Checks:
 | 6 | `E_INVALID_INDEX` | Index exceeds max_recipient |
 | 7 | `E_INSUFFICIENT_BALANCE` | Treasury doesn't have enough tokens |
 | 8 | `E_AIRDROP_ALREADY_INITIALIZED` | Airdrop already initialized |
+| 9 | `E_INVALID_CLAIM_TYPE` | Invalid claim type |
+| 10 | `E_VESTING_NOT_INITIALIZED` | Vesting config not set (for vesting claims) |
 
 ## Merkle Proof Verification
 
@@ -314,52 +404,11 @@ function verify_merkle_proof(leaf, proof, root, leaf_index):
     return current == root
 ```
 
-### Example
-
-For a tree with 4 recipients:
-```
-         Root
-        /    \
-      H01    H23
-     /  \    /  \
-    H0  H1  H2  H3
-    |   |   |   |
-   L0  L1  L2  L3
-```
-
-To claim L2 (index 2):
-- Leaf: `hash(address_2, amount_2, 2)`
-- Proof: `[H3, H01]`
-- Verification: `hash(hash(hash(L2, H3), H01)) == Root`
-
 ## Usage Examples
 
-### Example 1: Regular Claim (100%)
+### Example 1: Slashing Claim (50%)
 
 ```move
-// User has allocation: 1000 tokens at index 5
-
-let proof = vector[
-    x"abc123...",  // Sibling hashes
-    x"def456...",
-    x"789ghi...",
-];
-
-airdrop::claim(
-    &user_signer,
-    1000,          // Full allocation
-    5,             // User's index
-    proof
-);
-
-// Result: User receives 1000 tokens
-```
-
-### Example 2: Slashed Claim (50%)
-
-```move
-// Same allocation, but choose slashed option
-
 let proof = vector[
     x"abc123...",
     x"def456...",
@@ -368,38 +417,70 @@ let proof = vector[
 
 airdrop::claim_with_slashing(
     &user_signer,
-    1000,          // Must still provide FULL allocation
+    1000,
     5,
-    proof
+    proof,
+    solid_metadata
 );
 
 // Result: 
 // - User receives: 500 tokens
 // - Burned: 500 tokens
-// - Index 5 is marked as claimed (can't claim again)
+// - Index 5 marked as claimed (can't claim again)
 ```
 
-### Example 3: Check Eligibility Before Claiming
+### Example 2: Vesting Claim (Full Amount, Time-Locked)
 
 ```move
-// Frontend: Check if claim would succeed
+let proof = vector[
+    x"abc123...",
+    x"def456...",
+    x"789ghi...",
+];
 
-let is_eligible = airdrop::check_eligibility(
-    user_address,
+airdrop::claim_with_vesting(
+    &user_signer,
     1000,
     5,
-    proof
+    proof,
+    solid_metadata
 );
 
-if (is_eligible) {
-    // Show "Claim" button
-    
-    // Preview slashed amounts
-    let (receive, burn) = airdrop::preview_slashed_claim(1000);
-    // Display: "Receive 500, Burn 500"
-} else {
-    // Show error message
-}
+// Result:
+// - 1000 tokens locked in vesting contract
+// - User starts receiving unlocked portion immediately:
+//   - TGE%: Released at claim time
+//   - After cliff: Linear releases each period
+// - User calls vesting::claim_airdrop_vesting() to release portions
+```
+
+### Example 3: veSOLID Lock Claim (Voting Power + Rewards)
+
+```move
+// User locks for 1 year (~31,536,000 seconds)
+let lock_duration = 31536000;
+
+let proof = vector[
+    x"abc123...",
+    x"def456...",
+    x"789ghi...",
+];
+
+airdrop::claim_for_vesolid_lock(
+    &user_signer,
+    1000,
+    5,
+    proof,
+    solid_metadata,
+    lock_duration
+);
+
+// Result:
+// - 1000 tokens locked in veSOLID for 1 year
+// - Initial voting power: 1000 * (1 year remaining / 4 years max)
+// - Voting power decays linearly to 0 at unlock
+// - User earns rewards based on APR and duration
+// - After 1 year, user can withdraw principal + rewards
 ```
 
 ### Example 4: Admin Setup Flow
@@ -408,19 +489,47 @@ if (is_eligible) {
 // 1. Initialize airdrop
 airdrop::initialize_airdrop(
     &admin,
-    100000000,              // 1M tokens with 8 decimals
+    100000000,              // 100M tokens
     merkle_root_hash,
     30,                     // 30 days duration
     1000                    // 1000 recipients
 );
 
-// 2. Fund the airdrop
+// 2. Admin initializes vesting config (for vesting claims)
+vesting::initialize_vesting_config(
+    &admin,
+    1000,                   // 10% TGE
+    604800,                 // 1 week cliff
+    1000,                   // 10% at cliff
+    12,                     // 12 linear periods
+    2592000                 // 1 month per period
+);
+
+// 3. Fund the airdrop
 airdrop::fund_airdrop(&admin, 100000000);
 
-// 3. Announce to users - airdrop is live!
+// 4. Users can now claim with any of 3 options
 
-// 4. After period ends, withdraw unclaimed
+// 5. After period ends, withdraw unclaimed
 airdrop::emergency_withdraw(&admin, admin_address);
+```
+
+### Example 5: Check Eligibility Before Claiming
+
+```move
+let is_eligible = airdrop::check_eligibility(
+    user_address,
+    1000,
+    5,
+    proof
+);
+
+if (is_eligible) {
+    // Show three claim options to user
+    // - Slashing: Receive 500 now
+    // - Vesting: 1000 over vesting schedule
+    // - veSOLID: 1000 locked with voting power
+}
 ```
 
 ## Accounting & Token Economics
@@ -428,75 +537,66 @@ airdrop::emergency_withdraw(&admin, admin_address);
 ### Total Claimed vs Distributed
 
 Important distinction:
-- **total_claimed**: Counts the FULL allocation amount for each claim
-- **Actual distributed**: May be less due to slashing
+- **total_claimed**: Counts FULL allocation for each claim (regardless of option)
+- **actual_distributed**: Amount actually sent to users
 
 **Example:**
 ```
 3 users with 1000 tokens each:
 
-User A: Regular claim -> receives 1000
-User B: Slashed claim -> receives 500, burns 500  
-User C: Slashed claim -> receives 500, burns 500
+User A: Slashing -> receives 500, burns 500
+User B: Vesting -> receives in vesting contract (full 1000)
+User C: veSOLID -> locked in escrow (full 1000)
 
 Totals:
 - total_claimed: 3000 (all allocations counted)
-- total_distributed: 2000 (actually given to users)
-- total_burned: 1000 (from slashing)
-- total_allocation: 3000 (all claims accounted for)
+- In user wallets: 500 (slashing only)
+- In vesting contracts: 1000 (vesting user)
+- In veSOLID: 1000 (locked user)
+- total_burned: 500 (from slashing)
 ```
 
 ### Why Count Full Amount in total_claimed?
 
-Each index can only be claimed once. Whether the user chooses regular or slashed claim, that allocation is consumed. This approach:
+Each index can only be claimed once. Whether the user chooses slashing, vesting, or veSOLID, that allocation is consumed. This:
 
-✅ Prevents claiming the same index twice (even with different methods)  
+✅ Prevents claiming the same index twice  
 ✅ Simplifies remaining balance calculation  
-✅ Makes "allocation consumed" tracking consistent  
+✅ Makes "allocation consumed" consistent  
 ✅ Emergency withdrawal calculation is straightforward  
-
-### Token Flow Diagram
-
-```
-┌─────────────────┐
-│  Admin Wallet   │
-└────────┬────────┘
-         │ fund_airdrop()
-         ▼
-┌─────────────────┐
-│    Treasury     │
-└────────┬────────┘
-         │
-         ├─────────► Regular Claim: 100% → User
-         │
-         └─────────► Slashed Claim: 50% → User
-                                     50% → Burn (permanent)
-```
 
 ## Security Considerations
 
 ### 1. **One Claim Per Index**
-- Each index can only be claimed once
-- Claims vector tracks used indices
-- Prevents double-spending regardless of claim type
+- Each index can only be claimed once across all three options
+- Once claimed with any method, index cannot be used again
+- Prevents double-spending
 
 ### 2. **Merkle Proof Security**
 - Cryptographically impossible to forge valid proofs
 - Proofs are specific to (address, amount, index) tuple
 - Changing any parameter invalidates the proof
 
-### 3. **Admin Controls**
+### 3. **Vesting Security**
+- Each user can have only one vesting position
+- Vesting contract holds tokens, not user wallet initially
+- User controls when to release unlocked portions
+- Cannot claim vesting if vesting config not initialized
+
+### 4. **veSOLID Lock Security**
+- Tokens immediately locked upon claim
+- User must sign and choose lock duration
+- Lock can only be extended, not shortened
+- Withdrawal after lock expiry returns principal + rewards
+
+### 5. **Admin Controls**
 - Only @SOLID address can admin functions
 - No ability to change merkle root after initialization
 - No ability to modify existing claims
+- Vesting schedule immutable after initialization
 
-### 4. **Slashing is Irreversible**
-- Burned tokens are permanently removed from supply
-- No mechanism to reverse a slashed claim
-- Users should be clearly warned in UI
-
-### 5. **Treasury Management**
-- Tokens are held in contract-owned Treasury
+### 6. **Treasury Management**
+- Tokens held in contract-owned Treasury
 - Only claimable through valid merkle proofs
 - Admin can withdraw unclaimed tokens after period
 
@@ -510,14 +610,12 @@ Each index can only be claimed once. Whether the user chooses regular or slashed
 import { MerkleTree } from 'merkletreejs';
 import keccak256 from 'keccak256';
 
-// Prepare recipient data
 const recipients = [
     { address: "0x123...", amount: 1000, index: 0 },
     { address: "0x456...", amount: 2000, index: 1 },
     // ...
 ];
 
-// Create leaves
 const leaves = recipients.map(r => 
     keccak256(
         Buffer.concat([
@@ -528,11 +626,8 @@ const leaves = recipients.map(r =>
     )
 );
 
-// Build tree
 const tree = new MerkleTree(leaves, keccak256, { sortPairs: true });
 const root = tree.getRoot();
-
-// Store root on-chain, store full tree off-chain
 ```
 
 #### 2. Generate Proof for User
@@ -557,10 +652,7 @@ function getProofForUser(userAddress, userAmount, userIndex) {
 ```typescript
 // Check eligibility first
 const isEligible = await contract.check_eligibility(
-    userAddress,
-    allocation,
-    index,
-    proof
+    userAddress, allocation, index, proof
 );
 
 if (!isEligible) {
@@ -568,45 +660,37 @@ if (!isEligible) {
     return;
 }
 
-// Show claiming options
+// Show three claim options
 const showClaimOptions = () => {
+    const slashAmount = allocation / 2;
+    
     return (
         <div>
-            <button onClick={() => regularClaim()}>
-                Claim 100% ({allocation} tokens)
+            <button onClick={() => slashingClaim()}>
+                Quick Claim (50%)
+                <small>Receive: {slashAmount}</small>
+                <small>Burned: {slashAmount}</small>
             </button>
             
-            <button onClick={() => slashedClaim()}>
-                Quick Claim 50% ({allocation / 2} tokens)
-                <small>50% will be burned</small>
+            <button onClick={() => vestingClaim()}>
+                Vesting Claim (100%)
+                <small>Full amount vested over time</small>
+                <small>Start releasing with claim_airdrop_vesting()</small>
+            </button>
+            
+            <button onClick={() => lockClaim()}>
+                Lock in veSOLID
+                <small>Receive voting power + rewards</small>
+                <small>Choose lock duration</small>
             </button>
         </div>
     );
 };
-
-// Execute regular claim
-async function regularClaim() {
-    await contract.claim(allocation, index, proof);
-}
-
-// Execute slashed claim
-async function slashedClaim() {
-    // Warn user
-    const confirmed = confirm(
-        `You will receive ${allocation/2} tokens. ` +
-        `${allocation/2} tokens will be burned permanently. Continue?`
-    );
-    
-    if (confirmed) {
-        await contract.claim_with_slashing(allocation, index, proof);
-    }
-}
 ```
 
 #### 4. Display Airdrop Stats
 
 ```typescript
-// Get comprehensive stats
 const [
     merkleRoot,
     totalClaimed,
@@ -618,81 +702,54 @@ const [
 ] = await contract.get_detailed_airdrop_info();
 
 const stats = {
-    totalDistributed: totalClaimed - totalBurned,
-    totalBurned: totalBurned,
+    slashingUsage: (totalBurned / totalAllocation * 100).toFixed(2),
     claimRate: (totalClaimed / totalAllocation * 100).toFixed(2),
-    burnRate: (totalBurned / totalClaimed * 100).toFixed(2),
     remaining: remaining,
     daysLeft: Math.floor((endTime - Date.now()/1000) / 86400)
 };
-```
-
-### For Smart Contract Developers
-
-#### Integrating with Token Contract
-
-```move
-// In your token module
-public fun mint_for_airdrop(admin: &signer, amount: u64): Coin<SupraCoin> {
-    // Mint tokens for airdrop
-    let coins = coin::mint<SupraCoin>(amount, &mint_cap);
-    coins
-}
-
-// Admin transfers to airdrop
-let airdrop_tokens = token::mint_for_airdrop(&admin, 1000000);
-coin::deposit(@SOLID, airdrop_tokens);
-airdrop::fund_airdrop(&admin, 1000000);
 ```
 
 ## Best Practices
 
 ### For Users
 
-1. **Verify Your Allocation**: Check your allocation on the official airdrop page
-2. **Save Your Proof**: Keep your merkle proof safe until you claim
-3. **Understand Slashing**: Only use slashed claim if you need immediate 50%
-4. **Claim Before Deadline**: Claims expire after the airdrop period
-5. **Check Transaction**: Verify the correct function is being called
+1. **Understand Your Options**: Each claim type has different implications
+2. **Slashing**: Only if you need immediate 50% and don't care about other half
+3. **Vesting**: Best for long-term holders wanting full allocation
+4. **veSOLID**: Best if you want voting power and reward participation
+5. **Check Proof Validity**: Verify your proof before claiming
+6. **Claim Before Deadline**: All claims expire after airdrop period
 
 ### For Admins
 
-1. **Test Merkle Tree**: Verify tree generation before deployment
-2. **Audit Root**: Double-check merkle root before initializing
-3. **Fund Adequately**: Ensure treasury has enough tokens
-4. **Monitor Claims**: Track claim rate and burned tokens
-5. **Plan Withdrawal**: Schedule emergency withdrawal for unclaimed tokens
-6. **Communicate Clearly**: Explain slashing mechanism to users
+1. **Test All Three Paths**: Verify each claim type works properly
+2. **Initialize Vesting Config**: Required for vesting claims to work
+3. **Audit Merkle Tree**: Verify tree generation matches on-chain root
+4. **Fund Adequately**: Ensure treasury has tokens for all possible claims
+5. **Monitor Claims**: Track which claim types users prefer
+6. **Clear Communication**: Explain all three options with pros/cons
 
 ### For Frontend Developers
 
 1. **Validate Proofs**: Test proof generation thoroughly
-2. **Show Clear Options**: Make slashing implications obvious
-3. **Preview Amounts**: Show exact receive/burn amounts
-4. **Error Handling**: Provide clear error messages
-5. **Transaction Confirmation**: Show success/failure clearly
-6. **Track Events**: Monitor ClaimEvents for analytics
+2. **Show Clear Options**: Display pros/cons of each claim type
+3. **Lock Duration Guidance**: Suggest common durations for veSOLID
+4. **Vesting Timeline**: Show vesting schedule details
+5. **Transaction Confirmation**: Display success/failure clearly
 
 ## Testing Checklist
 
-- [ ] Regular claim with valid proof
-- [ ] Slashed claim with valid proof
-- [ ] Claim with invalid proof (should fail)
-- [ ] Double claim attempt (should fail)
-- [ ] Claim after expiration (should fail)
-- [ ] Claim with wrong amount (should fail)
-- [ ] Claim with wrong index (should fail)
-- [ ] Admin emergency withdrawal
-- [ ] Funding and initialization
-- [ ] View function accuracy
-- [ ] Event emission verification
-
-## Gas Optimization Tips
-
-1. **Merkle Tree Depth**: Keep tree balanced for shorter proofs
-2. **Batch Claims**: Consider allowing multiple claims in one transaction (future enhancement)
-3. **Off-Chain Storage**: Store full recipient list off-chain
-4. **Efficient Indexing**: Use sequential indices (0, 1, 2, ...) for optimal storage
+- [ ] Slashing claim with valid proof
+- [ ] Vesting claim with valid proof (requires vesting config)
+- [ ] veSOLID lock claim with various durations
+- [ ] All three options prevent double-claiming
+- [ ] Invalid merkle proofs are rejected
+- [ ] Claims after expiration fail
+- [ ] Vesting schedule accuracy
+- [ ] veSOLID lock creation and voting power calculation
+- [ ] Admin initialization and funding
+- [ ] Emergency withdrawal
+- [ ] Event emissions for all claim types
 
 ## License
 
