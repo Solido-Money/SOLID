@@ -1,4 +1,4 @@
-module PROTO::team_vesting {
+module PROTO::vesting {
     use std::signer;
     use std::error;
 
