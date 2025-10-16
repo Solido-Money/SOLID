@@ -8,6 +8,12 @@ module PROTO::airdrop {
     use supra_framework::coin::{Self, Coin};
     use supra_framework::timestamp;
     use supra_framework::supra_coin::SupraCoin;
+    use supra_framework::fungible_asset::Metadata;
+    use supra_framework::object::Object;
+    use supra_framework::primary_fungible_store;
+
+    use PROTO::vesting;
+    use solidove::vesting_escrow;
 
     /// Error codes
     const E_NOT_ADMIN: u64 = 1;
@@ -18,6 +24,13 @@ module PROTO::airdrop {
     const E_AIRDROP_ALREADY_INITIALIZED: u64 = 8;
     const E_INVALID_INDEX: u64 = 6;
     const E_INSUFFICIENT_BALANCE: u64 = 7;
+    const E_INVALID_CLAIM_TYPE: u64 = 9;        // NEW: Invalid claim type
+    const E_VESTING_NOT_INITIALIZED: u64 = 10;  // NEW: Vesting config not set
+
+    // Claim type constants
+    const CLAIM_TYPE_SLASH: u64 = 1;            // NEW: 50% slash
+    const CLAIM_TYPE_VEST: u64 = 2;             // NEW: Vesting
+    const CLAIM_TYPE_VESOLID: u64 = 3;          // NEW: VeSOLID lock
 
     struct Airdrop has key {
         merkle_root: vector<u8>,
@@ -26,7 +39,8 @@ module PROTO::airdrop {
         end_time: u64,
         max_recipient: u64,
         claims: vector<bool>,
-        total_burned: u64,  // NEW: Track total burned from slashing
+        total_burned: u64,
+        claim_types: vector<u64>,              // NEW: Track claim type per user
     }
 
     struct Treasury has key {
@@ -38,9 +52,25 @@ module PROTO::airdrop {
         claimant: address,
         amount: u64,
         index: u64,
-        slashed: bool,  // NEW: Track if claim was slashed
-        actual_received: u64,  // NEW: Actual amount received (50% if slashed)
-        burned_amount: u64,  // NEW: Amount burned (50% if slashed, 0 otherwise)
+        claim_type: u64,                       // NEW: Type of claim
+        actual_received: u64,                   // Amount user receives
+        burned_amount: u64,                     // Amount burned (for slash)
+    }
+
+    #[event]
+    struct VestingClaimEvent has drop, store {
+        claimant: address,
+        amount: u64,
+        index: u64,
+        start_time: u64,                       // When vesting starts
+    }
+
+    #[event]
+    struct VeSOLIDClaimEvent has drop, store {
+        claimant: address,
+        amount: u64,
+        index: u64,
+        message: vector<u8>,                   // Instruction to lock in veSOLID
     }
 
     #[event]
@@ -82,9 +112,11 @@ module PROTO::airdrop {
         let end_time = timestamp::now_seconds() + (duration_days * 86400);
 
         let claims = vector::empty<bool>();
+        let claim_types = vector::empty<u64>();
         let i = 0;
         while (i < max_recipient) {
             vector::push_back(&mut claims, false);
+            vector::push_back(&mut claim_types, 0);  // NEW: Initialize claim types
             i = i + 1;
         };
 
@@ -95,14 +127,15 @@ module PROTO::airdrop {
             end_time,
             max_recipient,
             claims,
-            total_burned: 0,  // NEW: Initialize burned counter
+            total_burned: 0,
+            claim_types,                        // NEW: Store claim types
         });
 
         move_to(admin, Treasury {
             coins: coin::zero<SupraCoin>(),
         });
 
-        event::emit<AirdropInitEvent>(AirdropInitEvent {
+        event::emit(AirdropInitEvent {
             total_allocation,
             max_recipient,
             end_time,
@@ -115,75 +148,32 @@ module PROTO::airdrop {
         assert!(admin_addr == @PROTO, E_NOT_ADMIN);
         assert!(exists<Treasury>(@PROTO), E_AIRDROP_NOT_INITIALIZED);
 
-        // Withdraw from primary store (requires admin signer)
         let coins = coin::withdraw<SupraCoin>(admin, amount);
 
-        // Deposit to treasury
         let treasury = borrow_global_mut<Treasury>(@PROTO);
         coin::merge(&mut treasury.coins, coins);
 
-        // Emit event
-        event::emit<FundEvent>(FundEvent { amount });
+        event::emit(FundEvent { amount });
     }
 
-    public entry fun claim(
-        account: &signer,
-        amount: u64,
-        index: u64,
-        proof: vector<vector<u8>>
-    ) acquires Airdrop, Treasury {
-        let user = signer::address_of(account);
-        let airdrop = borrow_global_mut<Airdrop>(@PROTO);
-        let now = timestamp::now_seconds();
-
-        assert!(now <= airdrop.end_time, E_AIRDROP_ENDED);
-        assert!(index < airdrop.max_recipient, E_INVALID_INDEX);
-        assert!(!*vector::borrow(&airdrop.claims, index), E_ALREADY_CLAIMED);
-        assert!(airdrop.total_claimed + amount <= airdrop.total_allocation, E_INSUFFICIENT_BALANCE);
-
-        let leaf_data = vector::empty<u8>();
-        vector::append(&mut leaf_data, bcs::to_bytes(&user));
-        vector::append(&mut leaf_data, bcs::to_bytes(&amount));  
-        vector::append(&mut leaf_data, bcs::to_bytes(&index));   
-        let leaf = hash::sha3_256(leaf_data);                   
-
-        assert!(verify_merkle_proof(&leaf, &proof, &airdrop.merkle_root, index), E_INVALID_PROOF);
-
-        *vector::borrow_mut(&mut airdrop.claims, index) = true;
-        airdrop.total_claimed = airdrop.total_claimed + amount;
-
-        let treasury = borrow_global_mut<Treasury>(@PROTO);
-        let extracted = coin::extract(&mut treasury.coins, amount);
-        coin::deposit(user, extracted);
-
-        event::emit<ClaimEvent>(ClaimEvent {
-            claimant: user,
-            amount,
-            index,
-            slashed: false,  // NEW: Regular claim, not slashed
-            actual_received: amount,  // NEW: Full amount received
-            burned_amount: 0,  // NEW: Nothing burned
-        });
-    }
-
-    // NEW FUNCTION: Claim with 50% slashing
+    /// Claim with 50% slashing (50% to user, 50% burned)
     public entry fun claim_with_slashing(
         account: &signer,
         amount: u64,
         index: u64,
-        proof: vector<vector<u8>>
+        proof: vector<vector<u8>>,
+        solid_metadata: Object<Metadata>
     ) acquires Airdrop, Treasury {
         let user = signer::address_of(account);
         let airdrop = borrow_global_mut<Airdrop>(@PROTO);
         let now = timestamp::now_seconds();
 
-        // Same validations as regular claim
         assert!(now <= airdrop.end_time, E_AIRDROP_ENDED);
         assert!(index < airdrop.max_recipient, E_INVALID_INDEX);
         assert!(!*vector::borrow(&airdrop.claims, index), E_ALREADY_CLAIMED);
         assert!(airdrop.total_claimed + amount <= airdrop.total_allocation, E_INSUFFICIENT_BALANCE);
 
-        // Verify merkle proof for FULL amount
+        // Verify merkle proof
         let leaf_data = vector::empty<u8>();
         vector::append(&mut leaf_data, bcs::to_bytes(&user));
         vector::append(&mut leaf_data, bcs::to_bytes(&amount));  
@@ -192,36 +182,136 @@ module PROTO::airdrop {
 
         assert!(verify_merkle_proof(&leaf, &proof, &airdrop.merkle_root, index), E_INVALID_PROOF);
 
-        // Mark claim as complete
+        // Mark as claimed and record claim type
         *vector::borrow_mut(&mut airdrop.claims, index) = true;
-        
-        // Account for FULL amount in total_claimed (Option A)
+        *vector::borrow_mut(&mut airdrop.claim_types, index) = CLAIM_TYPE_SLASH;
         airdrop.total_claimed = airdrop.total_claimed + amount;
 
         // Calculate slashed amounts: 50% to user, 50% burned
         let amount_to_receive = amount / 2;
-        let amount_to_burn = amount - amount_to_receive;  // Handles odd numbers correctly
+        let amount_to_burn = amount - amount_to_receive;
 
         let treasury = borrow_global_mut<Treasury>(@PROTO);
         
-        // Extract tokens for user (50%)
+        // Extract and send to user (50%)
         let user_coins = coin::extract(&mut treasury.coins, amount_to_receive);
         coin::deposit(user, user_coins);
 
-        // Extract and burn remaining tokens (50%)
+        // Extract and burn (50%)
         let burn_coins = coin::extract(&mut treasury.coins, amount_to_burn);
-        coin::burn(burn_coins, &supra_framework::supra_coin::get_burn_cap());
+        coin::burn(burn_coins);
 
-        // Track total burned
         airdrop.total_burned = airdrop.total_burned + amount_to_burn;
 
-        event::emit<ClaimEvent>(ClaimEvent {
+        event::emit(ClaimEvent {
             claimant: user,
-            amount,  // Original entitled amount
+            amount,
             index,
-            slashed: true,  // This was a slashed claim
-            actual_received: amount_to_receive,  // 50% received
-            burned_amount: amount_to_burn,  // 50% burned
+            claim_type: CLAIM_TYPE_SLASH,
+            actual_received: amount_to_receive,
+            burned_amount: amount_to_burn,
+        });
+    }
+
+    /// Claim with vesting (full amount goes into vesting contract)
+    public entry fun claim_with_vesting(
+        account: &signer,
+        amount: u64,
+        index: u64,
+        proof: vector<vector<u8>>,
+        solid_metadata: Object<Metadata>
+    ) acquires Airdrop, Treasury {
+        let user = signer::address_of(account);
+        let airdrop = borrow_global_mut<Airdrop>(@PROTO);
+        let now = timestamp::now_seconds();
+
+        assert!(now <= airdrop.end_time, E_AIRDROP_ENDED);
+        assert!(index < airdrop.max_recipient, E_INVALID_INDEX);
+        assert!(!*vector::borrow(&airdrop.claims, index), E_ALREADY_CLAIMED);
+        assert!(airdrop.total_claimed + amount <= airdrop.total_allocation, E_INSUFFICIENT_BALANCE);
+
+        // Verify vesting config is initialized
+        assert!(vesting::is_config_initialized(), E_VESTING_NOT_INITIALIZED);
+
+        // Verify merkle proof
+        let leaf_data = vector::empty<u8>();
+        vector::append(&mut leaf_data, bcs::to_bytes(&user));
+        vector::append(&mut leaf_data, bcs::to_bytes(&amount));  
+        vector::append(&mut leaf_data, bcs::to_bytes(&index));   
+        let leaf = hash::sha3_256(leaf_data);                   
+
+        assert!(verify_merkle_proof(&leaf, &proof, &airdrop.merkle_root, index), E_INVALID_PROOF);
+
+        // Mark as claimed and record claim type
+        *vector::borrow_mut(&mut airdrop.claims, index) = true;
+        *vector::borrow_mut(&mut airdrop.claim_types, index) = CLAIM_TYPE_VEST;
+        airdrop.total_claimed = airdrop.total_claimed + amount;
+
+        let treasury = borrow_global_mut<Treasury>(@PROTO);
+        
+        // Extract tokens from airdrop treasury
+        let vesting_coins = coin::extract(&mut treasury.coins, amount);
+        
+        // Deposit to user's primary store first
+        coin::deposit(user, vesting_coins);
+
+        // User creates vesting position with the received tokens
+        vesting::create_airdrop_vesting(account, amount, solid_metadata);
+
+        let vesting_start_time = timestamp::now_seconds();
+
+        event::emit(VestingClaimEvent {
+            claimant: user,
+            amount,
+            index,
+            start_time: vesting_start_time,
+        });
+    }
+
+    /// Claim for veSOLID locking (full amount transferred to user)
+    /// User then manually calls vesting_escrow::create_lock
+    public entry fun claim_for_vesolid_lock(
+        account: &signer,
+        amount: u64,
+        index: u64,
+        proof: vector<vector<u8>>
+    ) acquires Airdrop, Treasury {
+        let user = signer::address_of(account);
+        let airdrop = borrow_global_mut<Airdrop>(@PROTO);
+        let now = timestamp::now_seconds();
+
+        assert!(now <= airdrop.end_time, E_AIRDROP_ENDED);
+        assert!(index < airdrop.max_recipient, E_INVALID_INDEX);
+        assert!(!*vector::borrow(&airdrop.claims, index), E_ALREADY_CLAIMED);
+        assert!(airdrop.total_claimed + amount <= airdrop.total_allocation, E_INSUFFICIENT_BALANCE);
+
+        // Verify merkle proof
+        let leaf_data = vector::empty<u8>();
+        vector::append(&mut leaf_data, bcs::to_bytes(&user));
+        vector::append(&mut leaf_data, bcs::to_bytes(&amount));  
+        vector::append(&mut leaf_data, bcs::to_bytes(&index));   
+        let leaf = hash::sha3_256(leaf_data);                   
+
+        assert!(verify_merkle_proof(&leaf, &proof, &airdrop.merkle_root, index), E_INVALID_PROOF);
+
+        // Mark as claimed and record claim type
+        *vector::borrow_mut(&mut airdrop.claims, index) = true;
+        *vector::borrow_mut(&mut airdrop.claim_types, index) = CLAIM_TYPE_VESOLID;
+        airdrop.total_claimed = airdrop.total_claimed + amount;
+
+        let treasury = borrow_global_mut<Treasury>(@PROTO);
+        
+        // Extract tokens from airdrop treasury and deposit to user
+        let user_coins = coin::extract(&mut treasury.coins, amount);
+        coin::deposit(user, user_coins);
+
+        // Emit event with instruction to user
+        let instruction = b"Please call vesting_escrow::create_lock with your airdrop tokens to lock them for veSOLID voting power";
+        event::emit(VeSOLIDClaimEvent {
+            claimant: user,
+            amount,
+            index,
+            message: instruction,
         });
     }
 
@@ -265,7 +355,7 @@ module PROTO::airdrop {
         airdrop.end_time = timestamp::now_seconds();
 
         let remaining = airdrop.total_allocation - airdrop.total_claimed;
-        event::emit<AirdropEndedEvent>(AirdropEndedEvent {
+        event::emit(AirdropEndedEvent {
             total_claimed: airdrop.total_claimed,
             remaining_tokens: remaining,
         });
@@ -285,7 +375,7 @@ module PROTO::airdrop {
 
         airdrop.end_time = timestamp::now_seconds();
 
-        event::emit<EmergencyWithdrawEvent>(EmergencyWithdrawEvent {
+        event::emit(EmergencyWithdrawEvent {
             to,
             amount: remaining,
         });
@@ -300,24 +390,23 @@ module PROTO::airdrop {
             end_time: _,
             max_recipient: _,
             claims: _,
-            total_burned: _,  // NEW: Unpack burned field
+            total_burned: _,
+            claim_types: _,                    // NEW: Unpack claim types
         } = move_from<Airdrop>(@PROTO);
 
         let Treasury { coins } = move_from<Treasury>(@PROTO);
-        coin::destroy_zero(coins); // If empty; otherwise, ensure withdrawn first
+        coin::destroy_zero(coins);
     }
 
     // ======================
     // VIEW FUNCTIONS
     // ======================
 
-    // Check if airdrop is initialized
     #[view]
     public fun is_airdrop_initialized(): bool {
         exists<Airdrop>(@PROTO)
     }
 
-    // Get airdrop info
     #[view]
     public fun get_airdrop_info(): (vector<u8>, u64, u64, u64, u64, u64) acquires Airdrop {
         assert!(exists<Airdrop>(@PROTO), E_AIRDROP_NOT_INITIALIZED);
@@ -329,11 +418,10 @@ module PROTO::airdrop {
             airdrop.total_allocation,
             airdrop.end_time,
             airdrop.max_recipient,
-            remaining  // remaining allocation
+            remaining
         )
     }
 
-    // NEW: Get detailed airdrop info including burned tokens
     #[view]
     public fun get_detailed_airdrop_info(): (vector<u8>, u64, u64, u64, u64, u64, u64) acquires Airdrop {
         assert!(exists<Airdrop>(@PROTO), E_AIRDROP_NOT_INITIALIZED);
@@ -346,11 +434,10 @@ module PROTO::airdrop {
             airdrop.end_time,
             airdrop.max_recipient,
             remaining,
-            airdrop.total_burned  // NEW: Total burned from slashing
+            airdrop.total_burned
         )
     }
 
-    // Check if specific index has been claimed
     #[view]
     public fun is_claimed(index: u64): bool acquires Airdrop {
         assert!(exists<Airdrop>(@PROTO), E_AIRDROP_NOT_INITIALIZED);
@@ -359,7 +446,14 @@ module PROTO::airdrop {
         *vector::borrow(&airdrop.claims, index)
     }
 
-    // Check if airdrop is still active
+    #[view]
+    public fun get_claim_type(index: u64): u64 acquires Airdrop {
+        assert!(exists<Airdrop>(@PROTO), E_AIRDROP_NOT_INITIALIZED);
+        let airdrop = borrow_global<Airdrop>(@PROTO);
+        assert!(index < airdrop.max_recipient, E_INVALID_INDEX);
+        *vector::borrow(&airdrop.claim_types, index)
+    }
+
     #[view]
     public fun is_airdrop_active(): bool acquires Airdrop {
         if (!exists<Airdrop>(@PROTO)) {
@@ -370,7 +464,6 @@ module PROTO::airdrop {
         }
     }
 
-    // Get time remaining in seconds
     #[view]
     public fun get_time_remaining(): u64 acquires Airdrop {
         assert!(exists<Airdrop>(@PROTO), E_AIRDROP_NOT_INITIALIZED);
@@ -383,7 +476,6 @@ module PROTO::airdrop {
         }
     }
 
-    // Get total number of successful claims
     #[view]
     public fun get_total_claims(): u64 acquires Airdrop {
         if (!exists<Airdrop>(@PROTO)) {
@@ -404,21 +496,6 @@ module PROTO::airdrop {
         }
     }
 
-    // NEW: Calculate slashed amount (50% of original)
-    #[view]
-    public fun calculate_slashed_amount(amount: u64): u64 {
-        amount / 2
-    }
-
-    // NEW: Preview slashed claim amounts
-    #[view]
-    public fun preview_slashed_claim(amount: u64): (u64, u64) {
-        let amount_to_receive = amount / 2;
-        let amount_to_burn = amount - amount_to_receive;
-        (amount_to_receive, amount_to_burn)
-    }
-
-    // NEW: Get total burned tokens
     #[view]
     public fun get_total_burned(): u64 acquires Airdrop {
         assert!(exists<Airdrop>(@PROTO), E_AIRDROP_NOT_INITIALIZED);
@@ -426,7 +503,6 @@ module PROTO::airdrop {
         airdrop.total_burned
     }
 
-    // Check eligibility with proof verification (frontend helper)
     #[view]
     public fun check_eligibility(
         user: address,
@@ -440,13 +516,11 @@ module PROTO::airdrop {
 
         let airdrop = borrow_global<Airdrop>(@PROTO);
         
-        // Check basic conditions
         if (timestamp::now_seconds() > airdrop.end_time) return false;
         if (index >= airdrop.max_recipient) return false;
         if (*vector::borrow(&airdrop.claims, index)) return false;
         if (airdrop.total_claimed + amount > airdrop.total_allocation) return false;
 
-        // Verify merkle proof
         let leaf_data = vector::empty<u8>();
         vector::append(&mut leaf_data, bcs::to_bytes(&user));
         vector::append(&mut leaf_data, bcs::to_bytes(&amount));
@@ -456,7 +530,6 @@ module PROTO::airdrop {
         verify_merkle_proof(&leaf, &proof, &airdrop.merkle_root, index)
     }
 
-    // Get merkle root
     #[view]
     public fun get_merkle_root(): vector<u8> acquires Airdrop {
         assert!(exists<Airdrop>(@PROTO), E_AIRDROP_NOT_INITIALIZED);
@@ -464,7 +537,6 @@ module PROTO::airdrop {
         airdrop.merkle_root
     }
 
-    // Get remaining token balance in airdrop
     #[view]
     public fun get_remaining_balance(): u64 acquires Airdrop {
         assert!(exists<Airdrop>(@PROTO), E_AIRDROP_NOT_INITIALIZED);
