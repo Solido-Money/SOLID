@@ -148,6 +148,12 @@ module PROTO::airdrop {
         assert!(admin_addr == @PROTO, E_NOT_ADMIN);
         assert!(exists<Treasury>(@PROTO), E_AIRDROP_NOT_INITIALIZED);
 
+        let now = timestamp::now_seconds();
+        let airdrop = borrow_global<Airdrop>(@PROTO);
+
+        assert!(now <= airdrop.end_time, E_AIRDROP_ENDED);
+        assert!(airdrop.total_claimed < airdrop.total_allocation, E_AIRDROP_ALREADY_ENDED);
+
         let coins = coin::withdraw<SupraCoin>(admin, amount);
 
         let treasury = borrow_global_mut<Treasury>(@PROTO);
@@ -161,8 +167,7 @@ module PROTO::airdrop {
         account: &signer,
         amount: u64,
         index: u64,
-        proof: vector<vector<u8>>,
-        solid_metadata: Object<Metadata>
+        proof: vector<vector<u8>>
     ) acquires Airdrop, Treasury {
         let user = signer::address_of(account);
         let airdrop = borrow_global_mut<Airdrop>(@PROTO);
@@ -367,21 +372,25 @@ module PROTO::airdrop {
     public entry fun emergency_withdraw(admin: &signer, to: address) acquires Airdrop, Treasury {
         assert!(signer::address_of(admin) == @PROTO, E_NOT_ADMIN);
         let airdrop = borrow_global_mut<Airdrop>(@PROTO);
+        let calc_remaining = airdrop.total_allocation - airdrop.total_claimed;
 
-        let remaining = airdrop.total_allocation - airdrop.total_claimed;
+        let treasury = borrow_global_mut<Treasury>(@PROTO);
+        let actual_balance = coin::value(&treasury.coins);
+        let remaining = if (calc_remaining < actual_balance) { calc_remaining } else { actual_balance };
+
         if (remaining > 0) {
-            let treasury = borrow_global_mut<Treasury>(@PROTO);
-            let extracted = coin::extract(&mut treasury.coins, remaining);
+            let extracted = coin::extract(&mut treasury.coins, remaining); 
             coin::deposit(to, extracted);
-            airdrop.total_allocation = airdrop.total_claimed;
+
+            if (actual_balance == calc_remaining) {
+                airdrop.total_allocation = airdrop.total_claimed;
+            } else {
+                event::emit(DiscrepancyEvent { expected: calc_remaining, actual: actual_balance });
+            };
         };
 
         airdrop.end_time = timestamp::now_seconds();
-
-        event::emit(EmergencyWithdrawEvent {
-            to,
-            amount: remaining,
-        });
+        event::emit(EmergencyWithdrawEvent { to, amount: remaining });
     }
 
     public entry fun clear_airdrop(admin: &signer) acquires Airdrop, Treasury {

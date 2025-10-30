@@ -62,7 +62,7 @@ module PROTO::token {
     }
 
     /// Mint tokens (internal, called by airdrop)
-    public fun mint(amount: u64): FungibleAsset acquires TokenRefs {
+    fun mint(amount: u64): FungibleAsset acquires TokenRefs {
         let token_refs = borrow_global<TokenRefs>(@PROTO);
         fungible_asset::mint(&token_refs.mint_ref, amount)
     }

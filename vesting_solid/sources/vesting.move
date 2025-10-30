@@ -11,6 +11,7 @@ module PROTO::vesting {
     use supra_framework::account::{Self, SignerCapability};
 
     use PROTO::token;
+    friend PROTO::airdrop;
 
     /// Error codes
     const E_NOT_ADMIN: u64 = 1;
@@ -114,7 +115,7 @@ module PROTO::vesting {
 
     /// Create a vesting position for airdrop (called by airdrop contract)
     /// @notice: User must be signer; creates new vesting position with predefined schedule
-    public entry fun create_airdrop_vesting(
+    public(friend) fun create_airdrop_vesting (
         user: &signer,
         amount: u64,
         solid_metadata: Object<Metadata>
